@@ -164,7 +164,7 @@ DATASET_LOADERS = {
 }
 
 DATASET_LABELS = {
-    "synthetic": "Synthetic clustered (10K, dim=128) — instant, no download",
-    "sift-128": "SIFT-128 (ANN benchmark) — ~100MB download on first run",
-    "glove-100": "GloVe-100 (word embeddings) — ~150MB download on first run",
+    "synthetic": "Synthetic clustered (10K, dim=128)",
+    "sift-128": "SIFT-128 (requires: pip install datasets)",
+    "glove-100": "GloVe-100 (requires: pip install datasets)",
 }

@@ -4,4 +4,3 @@ scikit-learn>=1.2.0
 matplotlib>=3.7.0
 gradio>=4.0.0
 faiss-cpu>=1.7.0
-datasets>=2.0.0

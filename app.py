@@ -311,7 +311,8 @@ def benchmark_click(dataset, b2, b3, b4, progress=gr.Progress()):
 # Pre-compute defaults
 # ──────────────────────────────────────────────────────────
 
-_d_rows, _d_hdrs, _d_chart, _d_summary, _d_raw = _do_benchmark("synthetic", [2, 3, 4])
+# Use smaller dataset for startup (fast on HF free tier)
+_d_rows, _d_hdrs, _d_chart, _d_summary, _d_raw = _do_benchmark("synthetic", [3, 4])
 _d_viz, _d_viz_txt = _make_viz(64, 3, 42)
 _d_mem, _d_mem_txt = _make_mem(1_000_000, 768, "fp32", 3)
 
