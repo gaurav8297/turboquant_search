@@ -1,12 +1,14 @@
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Python 3.8+](https://img.shields.io/badge/Python-3.8%2B-blue.svg)](https://python.org)
-[![arXiv](https://img.shields.io/badge/arXiv-2504.19874-b31b1b.svg)](https://arxiv.org/abs/2504.19874)
+[![HuggingFace Space](https://img.shields.io/badge/%F0%9F%A4%97-Live_Demo-yellow.svg)](https://huggingface.co/spaces/tarun5986/turboquant-search)
 
 # TurboQuant Search
 
 **Vector compression for similarity search**, inspired by Google Research's [TurboQuant](https://arxiv.org/abs/2504.19874) (Zandieh et al., ICLR 2026).
 
 Compresses vector embeddings by **6-10x** with **84-92% Recall@10**, **zero training**, and instant indexing. Uses random orthogonal rotation + Lloyd-Max optimal quantization + sign-bit refinement.
+
+**[Live Demo](https://huggingface.co/spaces/tarun5986/turboquant-search)** | [LinkedIn](https://www.linkedin.com/in/tarun5986)
 
 ## Install
 

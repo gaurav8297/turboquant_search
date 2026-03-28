@@ -2,7 +2,7 @@
 title: TurboQuant Search
 emoji: "\U0001F50D"
 colorFrom: blue
-colorTo: cyan
+colorTo: indigo
 sdk: gradio
 sdk_version: "4.44.0"
 app_file: app.py
