@@ -251,10 +251,10 @@ def _make_mem(n_docs, emb_dim, precision, tq_bits):
 # Benchmark logic
 # ──────────────────────────────────────────────────────────
 
-def _do_benchmark(dataset_name, bit_widths, progress_cb=None):
+def _do_benchmark(dataset_name, bit_widths, progress_cb=None, n_vectors=10000):
     """Run benchmark, return (table_data, headers, chart_path, summary, raw)."""
     results = run_benchmark(
-        dataset_name=dataset_name, n_vectors=10000, n_queries=200,
+        dataset_name=dataset_name, n_vectors=n_vectors, n_queries=200,
         dim=128, k_values=[1, 5, 10, 50], bit_widths=bit_widths,
         progress_callback=progress_cb,
     )
@@ -311,8 +311,8 @@ def benchmark_click(dataset, b2, b3, b4, progress=gr.Progress()):
 # Pre-compute defaults
 # ──────────────────────────────────────────────────────────
 
-# Use smaller dataset for startup (fast on HF free tier)
-_d_rows, _d_hdrs, _d_chart, _d_summary, _d_raw = _do_benchmark("synthetic", [3, 4])
+# Small startup benchmark (fast on HF free tier ~2s)
+_d_rows, _d_hdrs, _d_chart, _d_summary, _d_raw = _do_benchmark("synthetic", [3, 4], n_vectors=2000)
 _d_viz, _d_viz_txt = _make_viz(64, 3, 42)
 _d_mem, _d_mem_txt = _make_mem(1_000_000, 768, "fp32", 3)
 
