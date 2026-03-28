@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "turboquant-search"
+version = "0.1.0"
+description = "Vector compression for similarity search, inspired by TurboQuant (ICLR 2026)"
+readme = "README.md"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.8"
+authors = [{name = "Tarun"}]
+keywords = ["vector-search", "quantization", "compression", "nearest-neighbor", "rag"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "numpy>=1.24.0",
+    "scipy>=1.10.0",
+    "scikit-learn>=1.2.0",
+]
+
+[project.optional-dependencies]
+demo = ["gradio>=4.0.0", "matplotlib>=3.7.0"]
+faiss = ["faiss-cpu>=1.7.0"]
+all = ["gradio>=4.0.0", "matplotlib>=3.7.0", "faiss-cpu>=1.7.0", "datasets>=2.0.0"]
+
+[project.urls]
+Homepage = "https://github.com/tarun-ks/turboquant_search"
+Demo = "https://huggingface.co/spaces/tarun5986/turboquant-search"
+
+[tool.setuptools.packages.find]
+include = ["turboquant_search*"]

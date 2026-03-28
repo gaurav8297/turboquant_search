@@ -22,16 +22,24 @@ pip install turboquant-search
 from turboquant_search import TurboQuantSearchIndex
 import numpy as np
 
+# Your embeddings (e.g., from sentence-transformers, OpenAI, etc.)
+# Here we simulate 10K document embeddings of dimension 128
+document_embeddings = np.random.randn(10000, 128).astype(np.float32)
+
+# Create a compressed index — no training needed
 index = TurboQuantSearchIndex(dim=128, bits=3)
+index.add(document_embeddings)
 
-vectors = np.random.randn(10000, 128).astype(np.float32)
-index.add(vectors)  # no training step
+# Search with a query embedding
+query_embedding = np.random.randn(1, 128).astype(np.float32)
+scores, top_k_indices = index.search(query_embedding, k=10)
 
-query = np.random.randn(1, 128).astype(np.float32)
-scores, indices = index.search(query, k=10)
-
-print(index.stats())
+print(f"Top 10 results: {top_k_indices[0]}")
+print(f"Compression: {index.stats()['compression_ratio']}")
+# -> '7.5x' (3-bit + sign-bit refinement)
 ```
+
+Works with any embedding model — just pass in your vectors. No codebook training, no dataset-specific tuning.
 
 ## Benchmark Results
 
