@@ -1,6 +1,6 @@
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Python 3.8+](https://img.shields.io/badge/Python-3.8%2B-blue.svg)](https://python.org)
-[![HuggingFace Space](https://img.shields.io/badge/%F0%9F%A4%97-Live_Demo-yellow.svg)](https://huggingface.co/spaces/tarun5986/turboquant-search)
+[![PyPI](https://img.shields.io/pypi/v/turboquant-search)](https://pypi.org/project/turboquant-search/)
 
 # TurboQuant Search
 
@@ -8,7 +8,7 @@
 
 Compresses vector embeddings by **6-10x** with **84-92% Recall@10**, **zero training**, and instant indexing. Uses random orthogonal rotation + Lloyd-Max optimal quantization + sign-bit refinement.
 
-**[Live Demo](https://huggingface.co/spaces/tarun5986/turboquant-search)** | [LinkedIn](https://www.linkedin.com/in/tarun5986)
+[LinkedIn](https://www.linkedin.com/in/tarun5986)
 
 ## Install
 
