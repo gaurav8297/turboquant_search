@@ -311,10 +311,16 @@ def benchmark_click(dataset, b2, b3, b4, progress=gr.Progress()):
 # Pre-compute defaults
 # ──────────────────────────────────────────────────────────
 
-# Small startup benchmark (fast on HF free tier ~2s)
-_d_rows, _d_hdrs, _d_chart, _d_summary, _d_raw = _do_benchmark("synthetic", [3, 4], n_vectors=2000)
-_d_viz, _d_viz_txt = _make_viz(64, 3, 42)
-_d_mem, _d_mem_txt = _make_mem(1_000_000, 768, "fp32", 3)
+# No pre-computation at startup (HF free tier has strict startup timeout)
+_d_rows = []
+_d_hdrs = ["Method", "Memory", "Compress.", "Build", "R@1", "R@5", "R@10", "R@50"]
+_d_chart = None
+_d_summary = "*Click **Run** to see benchmark results.*"
+_d_raw = ""
+_d_viz = None
+_d_viz_txt = "*Click **Update** to visualize compression.*"
+_d_mem = None
+_d_mem_txt = "*Click **Update** to calculate memory savings.*"
 
 
 # ──────────────────────────────────────────────────────────
