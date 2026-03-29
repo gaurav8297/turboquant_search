@@ -156,15 +156,153 @@ def load_glove100(
         return None
 
 
+def _read_fvecs(path: str) -> np.ndarray:
+    """Read .fvecs format (standard ANN benchmark format)."""
+    with open(path, "rb") as f:
+        data = f.read()
+    offset = 0
+    vectors = []
+    while offset < len(data):
+        dim = int.from_bytes(data[offset:offset + 4], byteorder="little")
+        offset += 4
+        vec = np.frombuffer(data[offset:offset + dim * 4], dtype=np.float32)
+        vectors.append(vec.copy())
+        offset += dim * 4
+    return np.array(vectors, dtype=np.float32)
+
+
+def _read_ivecs(path: str) -> np.ndarray:
+    """Read .ivecs format (standard ANN benchmark format)."""
+    with open(path, "rb") as f:
+        data = f.read()
+    offset = 0
+    vectors = []
+    while offset < len(data):
+        dim = int.from_bytes(data[offset:offset + 4], byteorder="little")
+        offset += 4
+        vec = np.frombuffer(data[offset:offset + dim * 4], dtype=np.int32)
+        vectors.append(vec.copy())
+        offset += dim * 4
+    return np.array(vectors, dtype=np.int32)
+
+
+def load_sift1m(
+    n_vectors: int = 1000000,
+    n_queries: int = 200,
+    progress_fn=None,
+) -> Optional[Tuple[np.ndarray, np.ndarray, str]]:
+    """
+    Load SIFT-1M dataset (1M 128-dim vectors from the standard ANN benchmark).
+
+    Downloads from the texmex corpus mirror. ~170MB compressed.
+    Returns None if download fails.
+    """
+    import os
+    import tarfile
+    from pathlib import Path
+
+    cache_dir = Path.home() / ".cache" / "turboquant" / "sift1m"
+    base_path = cache_dir / "sift" / "sift_base.fvecs"
+    query_path = cache_dir / "sift" / "sift_query.fvecs"
+    tar_path = cache_dir / "sift.tar.gz"
+
+    # Check if already extracted
+    if base_path.exists() and query_path.exists():
+        if progress_fn:
+            progress_fn("Loading SIFT-1M from cache...")
+    else:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        url = "ftp://ftp.irisa.fr/local/texmex/corpus/sift.tar.gz"
+        # Try HTTP mirror first (more reliable)
+        http_url = "http://corpus-texmex.irisa.fr/sift.tar.gz"
+
+        if progress_fn:
+            progress_fn("Downloading SIFT-1M (~170MB)...")
+
+        # Download
+        downloaded = False
+        for dl_url in [http_url, url]:
+            try:
+                import urllib.request
+                urllib.request.urlretrieve(dl_url, str(tar_path))
+                downloaded = True
+                break
+            except Exception:
+                continue
+
+        if not downloaded:
+            # Try with requests + tqdm
+            try:
+                import requests
+                from tqdm import tqdm
+                r = requests.get(http_url, stream=True, timeout=60)
+                r.raise_for_status()
+                total = int(r.headers.get("content-length", 0))
+                with open(tar_path, "wb") as f, tqdm(total=total, unit="B", unit_scale=True, desc="SIFT-1M") as pbar:
+                    for chunk in r.iter_content(8192):
+                        f.write(chunk)
+                        pbar.update(len(chunk))
+                downloaded = True
+            except Exception as e:
+                print(f"Download failed: {e}")
+                return None
+
+        if not downloaded:
+            return None
+
+        # Extract
+        if progress_fn:
+            progress_fn("Extracting SIFT-1M...")
+        try:
+            with tarfile.open(str(tar_path), "r:gz") as tar:
+                tar.extractall(path=str(cache_dir))
+        except Exception as e:
+            print(f"Extraction failed: {e}")
+            return None
+        finally:
+            if tar_path.exists():
+                tar_path.unlink()
+
+    if not base_path.exists():
+        print("SIFT-1M: base vectors not found after extraction")
+        return None
+
+    try:
+        if progress_fn:
+            progress_fn("Reading SIFT-1M vectors...")
+
+        db_vectors = _read_fvecs(str(base_path))
+        query_vectors = _read_fvecs(str(query_path))
+
+        # Subset if needed
+        if n_vectors < db_vectors.shape[0]:
+            db_vectors = db_vectors[:n_vectors]
+        if n_queries < query_vectors.shape[0]:
+            query_vectors = query_vectors[:n_queries]
+
+        db_vectors = _normalize(db_vectors)
+        query_vectors = _normalize(query_vectors)
+
+        return (
+            db_vectors, query_vectors,
+            f"SIFT-1M ({db_vectors.shape[0]:,} db, {query_vectors.shape[0]} queries, dim=128)"
+        )
+    except Exception as e:
+        print(f"Failed to read SIFT-1M: {e}")
+        return None
+
+
 # Registry of available datasets
 DATASET_LOADERS = {
     "synthetic": load_synthetic,
     "sift-128": load_sift128,
     "glove-100": load_glove100,
+    "sift-1m": load_sift1m,
 }
 
 DATASET_LABELS = {
     "synthetic": "Synthetic clustered (10K, dim=128)",
     "sift-128": "SIFT-128 (requires: pip install datasets)",
     "glove-100": "GloVe-100 (requires: pip install datasets)",
+    "sift-1m": "SIFT-1M (downloads ~170MB, standard ANN benchmark)",
 }

@@ -14,7 +14,7 @@ from .benchmarks import run_benchmark, compute_recall
 if FAISS_AVAILABLE:
     from .faiss_baselines import FAISSFlatIndex, FAISSPQIndex, FAISSIVFPQIndex
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 __all__ = [
     "TurboQuantSearchIndex",
     "FlatSearchIndex",

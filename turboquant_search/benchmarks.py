@@ -22,6 +22,7 @@ from .datasets import (
     load_glove100,
     DATASET_LOADERS,
 )
+# load_sift1m is available via DATASET_LOADERS["sift-1m"]
 
 
 def compute_recall(ground_truth: np.ndarray, predictions: np.ndarray, k: int) -> float:
@@ -230,7 +231,7 @@ def run_benchmark(
     else:
         update("Skipping IVF-PQ (faiss-cpu not installed)...")
 
-    # ── 4. TurboQuant variants ──
+    # ── 4. TurboQuant variants (flat brute-force) ──
     for bits in bit_widths:
         update(f"Building TurboQuant {bits}-bit...")
         tq = TurboQuantSearchIndex(dim, bits=bits, use_residual_sign=True, seed=seed)

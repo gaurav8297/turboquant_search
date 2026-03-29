@@ -1,5 +1,12 @@
 """
-TurboQuant Search — Interactive Demo
+TurboQuant Search — Interactive Comparison Dashboard
+
+Search Comparison: side-by-side TurboQuant vs FAISS PQ results
+with live stats (memory, build time, recall, compression).
+
+Launch via:
+  - `tqs demo` (CLI with pre-loaded data)
+  - `python app.py` (standalone with synthetic data)
 """
 
 import gradio as gr
@@ -9,41 +16,132 @@ import os
 
 _TMPDIR = tempfile.gettempdir()
 
-from turboquant_search.core import TurboQuantSearchIndex
+from turboquant_search.core import TurboQuantSearchIndex, FlatSearchIndex
 from turboquant_search.faiss_baselines import FAISS_AVAILABLE
-from turboquant_search.benchmarks import run_benchmark, format_results_table
-from turboquant_search.datasets import DATASET_LABELS
+from turboquant_search.benchmarks import compute_recall
 
 if not FAISS_AVAILABLE:
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("WARNING: faiss-cpu not installed.")
-    print("Baselines will use NumPy fallback (slower, less credible).")
+    print("FAISS baselines will use NumPy fallback.")
     print("Fix:  pip install faiss-cpu")
-    print("Or:   ./run.sh  (auto-creates venv with all dependencies)")
-    print("="*60 + "\n")
+    print("=" * 60 + "\n")
 
 
 # ──────────────────────────────────────────────────────────
-# Charts
+# Global state for the comparison dashboard
 # ──────────────────────────────────────────────────────────
 
-def _color(name):
+class DashboardState:
+    """Holds indexes and data for the current session."""
+
+    def __init__(self):
+        self.vectors = None
+        self.texts = None
+        self.info = None
+        self.dim = None
+        self.n_vectors = 0
+
+        self.tq_index = None
+        self.tq_bits = 3
+        self.pq_index = None
+        self.flat_index = None
+
+        self.build_stats = {}
+
+    def build_indexes(self, vectors, texts, bits=3):
+        """Build all indexes from vectors."""
+        self.vectors = vectors
+        self.texts = texts if texts else [f"Vector #{i}" for i in range(len(vectors))]
+        self.dim = vectors.shape[1]
+        self.n_vectors = vectors.shape[0]
+        self.tq_bits = bits
+        self.build_stats = {}
+
+        # Flat (ground truth)
+        if FAISS_AVAILABLE:
+            from turboquant_search.faiss_baselines import FAISSFlatIndex
+            self.flat_index = FAISSFlatIndex(self.dim)
+        else:
+            self.flat_index = FlatSearchIndex(self.dim)
+        self.flat_index.add(vectors)
+        self.build_stats["Flat (exact)"] = {
+            "memory_mb": self.flat_index.memory_bytes / (1024 * 1024),
+            "build_time": self.flat_index.build_time,
+            "compression": 1.0,
+        }
+
+        # TurboQuant — selected bits + all variants for stats chart
+        for b in [2, 3, 4]:
+            tq = TurboQuantSearchIndex(self.dim, bits=b, seed=42)
+            tq.add(vectors)
+            self.build_stats[f"TurboQuant {b}-bit"] = {
+                "memory_mb": tq.memory_bytes / (1024 * 1024),
+                "build_time": tq.build_time,
+                "compression": tq.compression_ratio,
+            }
+            if b == bits:
+                self.tq_index = tq
+
+        # FAISS PQ
+        self.pq_index = None
+        if FAISS_AVAILABLE:
+            from turboquant_search.faiss_baselines import FAISSPQIndex, FAISSIVFPQIndex
+            m = 8
+            while self.dim % m != 0 and m > 1:
+                m -= 1
+            self.pq_index = FAISSPQIndex(self.dim, m=m, nbits=8)
+            self.pq_index.add(vectors)
+            self.build_stats["FAISS PQ"] = {
+                "memory_mb": self.pq_index.memory_bytes / (1024 * 1024),
+                "build_time": self.pq_index.build_time,
+                "compression": vectors.shape[0] * self.dim * 4 / max(self.pq_index.memory_bytes, 1),
+            }
+
+            ivfpq = FAISSIVFPQIndex(self.dim, nlist=max(1, min(100, self.n_vectors // 39)),
+                                     m=m, nbits=8, nprobe=10)
+            ivfpq.add(vectors)
+            self.build_stats["FAISS IVF-PQ"] = {
+                "memory_mb": ivfpq.memory_bytes / (1024 * 1024),
+                "build_time": ivfpq.build_time,
+                "compression": vectors.shape[0] * self.dim * 4 / max(ivfpq.memory_bytes, 1),
+            }
+
+    def search(self, query_vector, k=10):
+        """Search both TQ and PQ, return results."""
+        if self.tq_index is None:
+            return None, None, None
+
+        q = query_vector.reshape(1, -1).astype(np.float32)
+        gt_scores, gt_indices = self.flat_index.search(q, k=k)
+        tq_scores, tq_indices = self.tq_index.search(q, k=k)
+
+        pq_scores, pq_indices = None, None
+        if self.pq_index is not None:
+            pq_scores, pq_indices = self.pq_index.search(q, k=k)
+
+        return (
+            (gt_scores[0], gt_indices[0]),
+            (tq_scores[0], tq_indices[0]),
+            (pq_scores[0], pq_indices[0]) if pq_indices is not None else None,
+        )
+
+
+_state = DashboardState()
+
+
+# ──────────────────────────────────────────────────────────
+# Chart helpers
+# ──────────────────────────────────────────────────────────
+
+def _color_for(name):
     if "Flat" in name: return "#94a3b8"
     if "IVF" in name: return "#f87171"
-    if "PQ" in name and "TurboQuant" not in name: return "#fb923c"
+    if "FAISS PQ" in name or ("PQ" in name and "TurboQuant" not in name): return "#fb923c"
     if "4-bit" in name: return "#3b82f6"
     if "3-bit" in name: return "#8b5cf6"
     if "2-bit" in name: return "#ec4899"
     return "#6ee7b7"
-
-
-def _short(name):
-    if "Flat" in name: return "Flat (exact)"
-    if "IVF-PQ" in name: return "IVF-PQ"
-    if "PQ" in name and "TurboQuant" not in name: return "PQ (FAISS)"
-    if "TurboQuant" in name:
-        return f"TQ {name.split('-bit')[0].split()[-1]}-bit"
-    return name[:10]
 
 
 def _style_ax(ax):
@@ -52,275 +150,252 @@ def _style_ax(ax):
     ax.tick_params(colors="#64748b", labelsize=9)
 
 
-def _make_chart(results):
-    """Single 2x2 figure."""
+def _make_stats_chart(build_stats, recall_data=None):
+    """Create the live stats dashboard chart (2x2)."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    methods = results["methods"]
-    ks = sorted(results["config"]["k_values"])
-    ck = 10 if 10 in ks else ks[-1]
-    ds = results["config"].get("dataset", "")
+    names = list(build_stats.keys())
+    # Sort: Flat first, then TQ variants by bits, then FAISS
+    order = []
+    for n in names:
+        if "Flat" in n:
+            order.append((0, 0, n))
+        elif "TurboQuant" in n:
+            bits = int(n.split()[1].split("-")[0])
+            order.append((1, bits, n))
+        elif "IVF" in n:
+            order.append((3, 0, n))
+        else:
+            order.append((2, 0, n))
+    order.sort()
+    names = [n for _, _, n in order]
 
-    names = list(methods.keys())
-    labels = [_short(n) for n in names]
-    cols = [_color(n) for n in names]
+    colors = [_color_for(n) for n in names]
     x = np.arange(len(names))
 
-    fig, axs = plt.subplots(2, 2, figsize=(18, 12), facecolor="white")
-    fig.subplots_adjust(hspace=0.32, wspace=0.26, top=0.93, bottom=0.05,
-                        left=0.06, right=0.97)
+    fig, axs = plt.subplots(2, 2, figsize=(16, 10), facecolor="white")
+    fig.subplots_adjust(hspace=0.38, wspace=0.28, top=0.93, bottom=0.08,
+                        left=0.08, right=0.97)
 
-    # 1. Recall bars
+    # 1. Memory usage
     ax = axs[0, 0]
-    vals = [methods[n]["recall"].get(ck, 0) * 100 for n in names]
-    bars = ax.bar(x, vals, color=cols, edgecolor="white", linewidth=1.5, width=0.6, zorder=3)
-    for b, v in zip(bars, vals):
-        ax.text(b.get_x() + b.get_width() / 2, b.get_height() + 1.5,
-                f"{v:.0f}%", ha="center", va="bottom", fontsize=10, fontweight="bold")
-    ax.set_xticks(x); ax.set_xticklabels(labels, fontsize=9)
-    ax.set_title(f"Recall@{ck}", fontsize=15, fontweight="bold", pad=10)
-    ax.set_ylim(0, 115); ax.set_ylabel("Recall (%)")
-    ax.yaxis.grid(True, alpha=0.12, zorder=0); _style_ax(ax)
-
-    # 2. Recall curve
-    ax = axs[0, 1]
-    markers = {"Flat": "o", "IVF": "X", "PQ": "s", "4-bit": "D", "3-bit": "^", "2-bit": "v"}
-    dashes = {"Flat": "-", "IVF": "--", "PQ": "--"}
-    for n, d in methods.items():
-        mk = next((v for k, v in markers.items() if k in n), "x")
-        ls = next((v for k, v in dashes.items() if k in n), "-")
-        r = [d["recall"].get(k, 0) * 100 for k in ks]
-        ax.plot(ks, r, marker=mk, color=_color(n), linewidth=2, markersize=5,
-                label=_short(n), linestyle=ls)
-    ax.set_xlabel("k"); ax.set_ylabel("Recall@k (%)")
-    ax.set_title("Recall vs k", fontsize=15, fontweight="bold", pad=10)
-    ax.legend(fontsize=8, loc="lower right", framealpha=0.9)
-    ax.set_ylim(0, 108); ax.grid(True, alpha=0.12); _style_ax(ax)
-
-    # 3. Memory
-    ax = axs[1, 0]
-    mem = [methods[n]["memory_mb"] for n in names]
-    bars = ax.bar(x, mem, color=cols, edgecolor="white", linewidth=1.5, width=0.6, zorder=3)
+    mem = [build_stats[n]["memory_mb"] for n in names]
+    bars = ax.bar(x, mem, color=colors, edgecolor="white", linewidth=1.5, width=0.6, zorder=3)
     for b, v in zip(bars, mem):
         lbl = f"{v:.1f}" if v >= 1 else f"{v:.2f}"
         ax.text(b.get_x() + b.get_width() / 2, b.get_height() + max(mem) * 0.03,
                 f"{lbl} MB", ha="center", va="bottom", fontsize=9, fontweight="bold")
-    ax.set_xticks(x); ax.set_xticklabels(labels, fontsize=9)
-    ax.set_title("Memory", fontsize=15, fontweight="bold", pad=10)
-    ax.set_ylabel("MB"); ax.yaxis.grid(True, alpha=0.12, zorder=0); _style_ax(ax)
+    ax.set_xticks(x)
+    ax.set_xticklabels(names, fontsize=8, rotation=20, ha="right")
+    ax.set_title("Memory Usage", fontsize=13, fontweight="bold", pad=10)
+    ax.set_ylabel("MB")
+    ax.yaxis.grid(True, alpha=0.12, zorder=0)
+    _style_ax(ax)
 
-    # 4. Build time
-    ax = axs[1, 1]
-    bt = [methods[n]["build_time"] for n in names]
-    bars = ax.bar(x, bt, color=cols, edgecolor="white", linewidth=1.5, width=0.6, zorder=3)
+    # 2. Index build time
+    ax = axs[0, 1]
+    bt = [build_stats[n]["build_time"] for n in names]
+    bars = ax.bar(x, bt, color=colors, edgecolor="white", linewidth=1.5, width=0.6, zorder=3)
     for b, v in zip(bars, bt):
         lbl = f"{v:.3f}s" if v < 1 else f"{v:.1f}s"
-        ax.text(b.get_x() + b.get_width() / 2, b.get_height() + max(bt) * 0.04,
+        ax.text(b.get_x() + b.get_width() / 2, b.get_height() + max(max(bt), 0.001) * 0.04,
                 lbl, ha="center", va="bottom", fontsize=9, fontweight="bold")
-    ax.set_xticks(x); ax.set_xticklabels(labels, fontsize=9)
-    ax.set_title("Build Time", fontsize=15, fontweight="bold", pad=10)
-    ax.set_ylabel("Seconds"); ax.yaxis.grid(True, alpha=0.12, zorder=0); _style_ax(ax)
+    ax.set_xticks(x)
+    ax.set_xticklabels(names, fontsize=8, rotation=20, ha="right")
+    ax.set_title("Index Build Time", fontsize=13, fontweight="bold", pad=10)
+    ax.set_ylabel("Seconds")
+    ax.yaxis.grid(True, alpha=0.12, zorder=0)
+    _style_ax(ax)
 
-    fig.suptitle(ds, fontsize=14, fontweight="bold", y=0.97)
+    # 3. Compression ratio
+    ax = axs[1, 0]
+    comp = [build_stats[n]["compression"] for n in names]
+    bars = ax.bar(x, comp, color=colors, edgecolor="white", linewidth=1.5, width=0.6, zorder=3)
+    for b, v in zip(bars, comp):
+        ax.text(b.get_x() + b.get_width() / 2, b.get_height() + max(comp) * 0.03,
+                f"{v:.1f}x", ha="center", va="bottom", fontsize=9, fontweight="bold")
+    ax.set_xticks(x)
+    ax.set_xticklabels(names, fontsize=8, rotation=20, ha="right")
+    ax.set_title("Compression Ratio", fontsize=13, fontweight="bold", pad=10)
+    ax.set_ylabel("Ratio (higher = better)")
+    ax.yaxis.grid(True, alpha=0.12, zorder=0)
+    _style_ax(ax)
 
-    path = os.path.join(_TMPDIR, "tq_chart.png")
+    # 4. Recall@10
+    ax = axs[1, 1]
+    if recall_data:
+        r_names = list(recall_data.keys())
+        r_names_sorted = sorted(r_names, key=lambda n: (
+            0 if "Flat" in n else 1 if "TurboQuant" in n else 2
+        ))
+        r_colors = [_color_for(n) for n in r_names_sorted]
+        r_vals = [recall_data[n] * 100 for n in r_names_sorted]
+        r_x = np.arange(len(r_names_sorted))
+        bars = ax.bar(r_x, r_vals, color=r_colors, edgecolor="white", linewidth=1.5, width=0.6, zorder=3)
+        for b, v in zip(bars, r_vals):
+            ax.text(b.get_x() + b.get_width() / 2, b.get_height() + 1.5,
+                    f"{v:.0f}%", ha="center", va="bottom", fontsize=10, fontweight="bold")
+        ax.set_xticks(r_x)
+        ax.set_xticklabels(r_names_sorted, fontsize=8, rotation=20, ha="right")
+        ax.set_ylim(0, 115)
+    else:
+        ax.text(0.5, 0.5, "Run a search to see recall", ha="center", va="center",
+                fontsize=12, color="#94a3b8", transform=ax.transAxes)
+    ax.set_title("Recall@10", fontsize=13, fontweight="bold", pad=10)
+    ax.set_ylabel("Recall (%)")
+    ax.yaxis.grid(True, alpha=0.12, zorder=0)
+    _style_ax(ax)
+
+    path = os.path.join(_TMPDIR, "tq_stats.png")
     fig.savefig(path, format="png", dpi=150, bbox_inches="tight")
     plt.close(fig)
     return path
 
 
-def _make_viz(dim, bits, seed):
-    """Compression visualizer — 2x2 pipeline."""
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
+# ──────────────────────────────────────────────────────────
+# Dashboard logic
+# ──────────────────────────────────────────────────────────
 
-    dim, bits, seed = int(dim), int(bits), int(seed)
-    rng = np.random.RandomState(seed)
-    vec = rng.randn(dim).astype(np.float32)
-    vec /= np.linalg.norm(vec)
+def _load_default_data():
+    """Load synthetic data for standalone mode."""
+    from turboquant_search.datasets import load_synthetic
+    vectors, queries, label = load_synthetic(10000, 200, 128, 42)
+    texts = [f"Synthetic document #{i+1} (dim=128, cluster-based)" for i in range(vectors.shape[0])]
+    return vectors, queries, texts
 
-    tq = TurboQuantSearchIndex(dim=dim, bits=bits, use_residual_sign=True, seed=42)
-    d = tq.compress_with_details(vec)
 
-    show = min(dim, 48)
-    xi = np.arange(show)
-    orig = d["original"][:show]
-    rot = d["rotated"].squeeze()[:show]
-    has_ref = "refined_reconstructed" in d
+def _try_load_demo_data():
+    """Try to load CLI-provided demo data, fall back to synthetic."""
+    try:
+        from turboquant_search._app_launcher import get_demo_data
+        v, q, t, info = get_demo_data()
+        if v is not None:
+            return v, q, t, info
+    except (ImportError, Exception):
+        pass
+    return None
 
-    fig, axs = plt.subplots(2, 2, figsize=(15, 9), facecolor="white")
-    fig.subplots_adjust(hspace=0.38, wspace=0.25)
 
-    ax = axs[0, 0]
-    ax.bar(xi, orig, width=0.7, color="#3b82f6", alpha=0.85)
-    ax.set_title("1. Original", fontsize=12, fontweight="bold")
-    ax.axhline(0, color="#e2e8f0", lw=0.5); ax.set_xlim(-0.5, show-0.5); _style_ax(ax)
+def init_dashboard(dataset_choice, bits):
+    """Initialize or re-initialize the dashboard with given settings."""
+    bits = int(bits)
 
-    ax = axs[0, 1]
-    ax.bar(xi, rot, width=0.7, color="#8b5cf6", alpha=0.85)
-    ax.set_title("2. After Rotation", fontsize=12, fontweight="bold")
-    ax.axhline(0, color="#e2e8f0", lw=0.5); ax.set_xlim(-0.5, show-0.5); _style_ax(ax)
-    ax.annotate(f"Each coord ~ N(0, 1/{dim})", xy=(0.5, 0.93), xycoords="axes fraction",
-                ha="center", fontsize=8, color="#6b21a8",
-                bbox=dict(boxstyle="round,pad=0.2", fc="#f5f3ff", ec="#c4b5fd", alpha=0.9))
+    # Parse dataset choice — strip parenthetical model name if present
+    # e.g. "wikipedia-768 (BGE-base)" -> "wikipedia-768"
+    ds_key = dataset_choice.split(" (")[0].strip() if dataset_choice else "synthetic"
 
-    ax = axs[1, 0]
-    if has_ref:
-        ref = d["refined_reconstructed"].squeeze()[:show]
-        ax.bar(xi-0.17, rot, width=0.34, color="#8b5cf6", alpha=0.5, label="Exact")
-        ax.bar(xi+0.17, ref, width=0.34, color="#22c55e", alpha=0.8, label=f"{bits}b+sign")
+    # Try CLI-provided data first
+    demo_data = _try_load_demo_data()
+    if demo_data is not None and ds_key == "demo":
+        vectors, queries, texts, info = demo_data
+    elif ds_key != "synthetic":
+        try:
+            from turboquant_search.dataset_hub import load_dataset
+            vectors, queries, texts, info = load_dataset(ds_key)
+        except Exception:
+            vectors, queries, texts = _load_default_data()
+            info = None
     else:
-        rec = d["reconstructed"].squeeze()[:show]
-        ax.bar(xi-0.17, rot, width=0.34, color="#8b5cf6", alpha=0.5, label="Exact")
-        ax.bar(xi+0.17, rec, width=0.34, color="#fb923c", alpha=0.8, label=f"{bits}-bit")
-    ax.set_title("3. Reconstruction", fontsize=12, fontweight="bold")
-    ax.legend(fontsize=8); ax.axhline(0, color="#e2e8f0", lw=0.5)
-    ax.set_xlim(-0.5, show-0.5); _style_ax(ax)
+        vectors, queries, texts = _load_default_data()
+        info = None
 
-    ax = axs[1, 1]
-    base_err = np.abs((d["rotated"].squeeze() - d["reconstructed"].squeeze())[:show])
-    err_pct = d["reconstruction_error"] / np.linalg.norm(d["original"]) * 100
-    if has_ref:
-        ref_err = np.abs((d["rotated"].squeeze() - d["refined_reconstructed"].squeeze())[:show])
-        ref_pct = d["refined_error"] / np.linalg.norm(d["original"]) * 100
-        ax.bar(xi-0.17, base_err, width=0.34, color="#fb923c", alpha=0.7, label=f"{bits}b only")
-        ax.bar(xi+0.17, ref_err, width=0.34, color="#22c55e", alpha=0.7, label="+sign")
-        ax.legend(fontsize=8)
-        ax.annotate(f"{err_pct:.1f}% -> {ref_pct:.1f}%", xy=(0.97, 0.92),
-                    xycoords="axes fraction", ha="right", fontsize=10, fontweight="bold",
-                    bbox=dict(boxstyle="round,pad=0.3", fc="#f0fdf4", ec="#86efac"))
+    _state.build_indexes(vectors, texts, bits=bits)
+
+    # Compute recall with sample queries
+    from turboquant_search.datasets import load_synthetic
+    if info:
+        rng = np.random.RandomState(42)
+        qi = rng.choice(vectors.shape[0], size=min(200, vectors.shape[0] // 5), replace=False)
+        sample_q = vectors[qi].copy()
+        sample_q += rng.randn(*sample_q.shape).astype(np.float32) * 0.05
+        norms = np.linalg.norm(sample_q, axis=1, keepdims=True)
+        sample_q = sample_q / np.maximum(norms, 1e-8)
     else:
-        ax.bar(xi, base_err, width=0.7, color="#f87171", alpha=0.8)
-        ax.annotate(f"{err_pct:.1f}%", xy=(0.97, 0.92), xycoords="axes fraction",
-                    ha="right", fontsize=10, fontweight="bold",
-                    bbox=dict(boxstyle="round,pad=0.3", fc="#fef2f2", ec="#fca5a5"))
-    ax.set_title("4. Error", fontsize=12, fontweight="bold")
-    ax.set_xlim(-0.5, show-0.5); _style_ax(ax)
+        _, sample_q, _ = load_synthetic(10000, 200, 128, 42)
+        sample_q = sample_q[:min(200, _state.n_vectors // 5)]
 
-    fig.suptitle(f"TurboQuant {bits}-bit (dim={dim})", fontsize=13, fontweight="bold", y=0.99)
+    # Ground truth
+    _, gt_idx = _state.flat_index.search(sample_q, k=10)
+    recall_data = {"Flat (exact)": 1.0}
 
-    path = os.path.join(_TMPDIR, "tq_viz.png")
-    fig.savefig(path, format="png", dpi=150, bbox_inches="tight")
-    plt.close(fig)
+    # TQ recall
+    _, tq_idx = _state.tq_index.search(sample_q, k=10)
+    tq_recall = compute_recall(gt_idx, tq_idx, 10)
+    recall_data[f"TurboQuant {bits}-bit"] = tq_recall
 
-    txt = f"**{bits}-bit + sign** = {2**(bits+1)} effective levels, ~{32/(bits+1):.0f}x compression"
-    if has_ref:
-        txt += f" | Error: {err_pct:.1f}% -> {ref_pct:.1f}%"
-    return path, txt
+    # PQ recall
+    if _state.pq_index is not None:
+        _, pq_idx = _state.pq_index.search(sample_q, k=10)
+        pq_recall = compute_recall(gt_idx, pq_idx, 10)
+        recall_data["FAISS PQ"] = pq_recall
 
+    chart = _make_stats_chart(_state.build_stats, recall_data)
+    n = _state.n_vectors
+    dim = _state.dim
+    summary = f"Indexed **{n:,}** vectors in **{dim}** dimensions"
 
-def _make_mem(n_docs, emb_dim, precision, tq_bits):
-    """Memory calculator chart."""
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    n_docs, emb_dim, tq_bits = int(n_docs), int(emb_dim), int(tq_bits)
-    bpe = 4 if precision == "fp32" else 2
-
-    orig_gb = n_docs * emb_dim * bpe / (1024**3)
-    tq_bpv = (tq_bits + 1) * emb_dim + 32
-    tq_gb = n_docs * tq_bpv // 8 / (1024**3)
-    ratio = (n_docs * emb_dim * bpe) / max(n_docs * tq_bpv // 8, 1)
-    save = orig_gb - tq_gb
-
-    fig, ax = plt.subplots(figsize=(10, 3), facecolor="white")
-    ax.barh([f"TurboQuant ({tq_bits}-bit)", f"Original ({precision})"],
-            [tq_gb, orig_gb], color=["#22c55e", "#f87171"], edgecolor="white", height=0.4)
-    for i, v in enumerate([tq_gb, orig_gb]):
-        ax.text(v + max(orig_gb, 0.001) * 0.02, i,
-                f"{v:.2f} GB" if v < 100 else f"{v:.0f} GB",
-                va="center", fontsize=12, fontweight="bold")
-    ax.set_xlabel("Memory (GB)")
-    ax.set_title(f"{ratio:.1f}x compression — saves {save:.2f} GB",
-                 fontsize=13, fontweight="bold")
-    ax.set_xlim(0, max(orig_gb, 0.001) * 1.3); _style_ax(ax)
-
-    path = os.path.join(_TMPDIR, "tq_mem.png")
-    fig.savefig(path, format="png", dpi=150, bbox_inches="tight")
-    plt.close(fig)
-
-    txt = f"**{n_docs:,}** vectors x {emb_dim}D: **{orig_gb:.2f} GB** -> **{tq_gb:.2f} GB** ({ratio:.1f}x)"
-    return path, txt
+    return chart, summary
 
 
-# ──────────────────────────────────────────────────────────
-# Benchmark logic
-# ──────────────────────────────────────────────────────────
-
-def _do_benchmark(dataset_name, bit_widths, progress_cb=None, n_vectors=10000):
-    """Run benchmark, return (table_data, headers, chart_path, summary, raw)."""
-    results = run_benchmark(
-        dataset_name=dataset_name, n_vectors=n_vectors, n_queries=200,
-        dim=128, k_values=[1, 5, 10, 50], bit_widths=bit_widths,
-        progress_callback=progress_cb,
-    )
-
-    ks = results["config"]["k_values"]
-    headers = ["Method", "Memory", "Compress.", "Build"] + [f"R@{k}" for k in ks]
-    rows = []
-    for name, d in results["methods"].items():
-        rows.append([_short(name), f"{d['memory_mb']:.2f} MB",
-                     f"{d['compression_ratio']:.1f}x", f"{d['build_time']:.3f}s"]
-                    + [f"{d['recall'][k]:.0%}" for k in ks])
-
-    chart = _make_chart(results)
-
-    # One-line summary
-    ds = results["config"].get("dataset", "")
-    tq = {k: v for k, v in results["methods"].items() if "TurboQuant" in k}
-    pq = {k: v for k, v in results["methods"].items()
-          if "PQ" in k and "TurboQuant" not in k and "Flat" not in k}
-    ck = 10 if 10 in ks else ks[-1]
-
-    summary = f"**{ds}**\n\n"
-    if tq:
-        best_n = max(tq, key=lambda x: tq[x]["recall"].get(ck, 0))
-        best = tq[best_n]
-        summary += f"Best: **{_short(best_n)}** — {best['recall'][ck]:.0%} R@{ck}, {best['compression_ratio']:.1f}x compression"
-        if pq:
-            best_pq_n = max(pq, key=lambda x: pq[x]["recall"].get(ck, 0))
-            pq_r = pq[best_pq_n]["recall"].get(ck, 0)
-            diff = (best["recall"][ck] - pq_r) * 100
-            summary += f"\n\nvs **{_short(best_pq_n)}**: {'+' if diff>0 else ''}{diff:.0f}pp recall"
-            if best["build_time"] > 0 and pq[best_pq_n]["build_time"] > 0:
-                spd = pq[best_pq_n]["build_time"] / max(best["build_time"], 1e-6)
-                if spd > 1.5:
-                    summary += f", {spd:.0f}x faster build"
-    summary += "\n\n*All baselines: faiss-cpu. TurboQuant: NumPy.*"
-
-    raw = format_results_table(results)
-    return rows, headers, chart, summary, raw
+def _format_results(indices, scores, gt_set, header):
+    """Format a method's top-10 results as markdown."""
+    lines = []
+    for rank, (idx, score) in enumerate(zip(indices, scores)):
+        text = _state.texts[idx] if idx < len(_state.texts) else f"Vector #{idx}"
+        match = "+" if idx in gt_set else "-"
+        lines.append(f"{match} **{rank+1}.** [{idx}] {text[:80]}  (score: {score:.4f})")
+    matches = len(set(indices.tolist()) & gt_set)
+    return f"{header} -- {matches}/10 match exact\n\n" + "\n\n".join(lines)
 
 
-def benchmark_click(dataset, b2, b3, b4, progress=gr.Progress()):
-    bits = []
-    if b2: bits.append(2)
-    if b3: bits.append(3)
-    if b4: bits.append(4)
-    if not bits: bits = [3]
-    def cb(s, t, m): progress(s/t, desc=m)
-    rows, headers, chart, summary, raw = _do_benchmark(dataset, bits, cb)
-    return chart, rows, summary
+def do_search(query_idx_str, bits):
+    """Perform a search using a random query vector (by index)."""
+    if _state.vectors is None:
+        return "Not initialized. Click Re-index first.", "", "", None
+
+    bits = int(bits)
+
+    try:
+        qi = int(query_idx_str) % _state.n_vectors
+    except (ValueError, TypeError):
+        qi = np.random.randint(0, _state.n_vectors)
+
+    rng = np.random.RandomState(qi)
+    query = _state.vectors[qi].copy()
+    query += rng.randn(len(query)).astype(np.float32) * 0.05
+    query /= np.linalg.norm(query)
+
+    gt_res, tq_res, pq_res = _state.search(query, k=10)
+
+    if gt_res is None:
+        return "Index not built.", "", "", None
+
+    gt_scores, gt_indices = gt_res
+    gt_set = set(gt_indices.tolist())
+
+    # TQ results
+    tq_text = _format_results(tq_res[1], tq_res[0], gt_set, f"### TurboQuant ({bits}-bit)")
+
+    # FAISS PQ results
+    if pq_res is not None:
+        pq_text = _format_results(pq_res[1], pq_res[0], gt_set, "### FAISS PQ")
+    else:
+        pq_text = "### FAISS PQ (not available)\n\n*Install faiss-cpu for PQ comparison.*"
+
+    # Ground truth
+    gt_lines = [f"**{r+1}.** [{idx}] {_state.texts[idx][:80] if idx < len(_state.texts) else f'Vector #{idx}'}  (score: {s:.4f})"
+                for r, (idx, s) in enumerate(zip(gt_indices, gt_scores))]
+    gt_text = "### Exact (ground truth)\n\n" + "\n\n".join(gt_lines)
+
+    return tq_text, pq_text, gt_text, f"Query: perturbed copy of vector #{qi}"
 
 
-# ──────────────────────────────────────────────────────────
-# Pre-compute defaults
-# ──────────────────────────────────────────────────────────
-
-# No pre-computation at startup (HF free tier has strict startup timeout)
-_d_rows = []
-_d_hdrs = ["Method", "Memory", "Compress.", "Build", "R@1", "R@5", "R@10", "R@50"]
-_d_chart = None
-_d_summary = "*Click **Run** to see benchmark results.*"
-_d_raw = ""
-_d_viz = None
-_d_viz_txt = "*Click **Update** to visualize compression.*"
-_d_mem = None
-_d_mem_txt = "*Click **Update** to calculate memory savings.*"
+def random_search(bits):
+    """Search with a random query index."""
+    qi = np.random.randint(0, max(_state.n_vectors, 1))
+    return do_search(str(qi), bits)
 
 
 # ──────────────────────────────────────────────────────────
@@ -331,12 +406,94 @@ _DESC = """# TurboQuant Search
 
 Compresses vector embeddings by **6-10x** with **84-92% Recall@10** and **zero training**.
 
-Inspired by [TurboQuant](https://arxiv.org/abs/2504.19874) (Zandieh et al., ICLR 2026). \
+Inspired by [TurboQuant](https://arxiv.org/abs/2504.19874). \
 Uses random orthogonal rotation + Lloyd-Max optimal quantization + sign-bit refinement. \
 All baselines use real [faiss-cpu](https://github.com/facebookresearch/faiss). \
-[GitHub](https://github.com/tarun-ks/turboquant_search)"""
+[GitHub](https://github.com/tarun-ks/turboquant_search) | \
+[PyPI](https://pypi.org/project/turboquant-search/)"""
 
-_HOW = """## How It Works
+_CSS = """
+.metric {
+    background: linear-gradient(135deg, #eff6ff, #f0f9ff);
+    border: 1px solid #bfdbfe; border-radius: 12px;
+    padding: 16px; text-align: center;
+}
+.metric h2 { margin: 0; font-size: 1.6rem; color: #1e40af; }
+.metric p { margin: 4px 0 0; font-size: 0.82rem; color: #475569; }
+"""
+
+with gr.Blocks(
+    title="TurboQuant Search",
+    theme=gr.themes.Soft(primary_hue="blue", secondary_hue="cyan"),
+    css=_CSS,
+) as demo:
+
+    gr.Markdown(_DESC)
+
+    # Key metrics
+    with gr.Row():
+        gr.HTML('<div class="metric"><h2>6-10x</h2><p>Compression</p></div>')
+        gr.HTML('<div class="metric"><h2>84-92%</h2><p>Recall@10 (4-bit)</p></div>')
+        gr.HTML('<div class="metric"><h2>~10x</h2><p>Faster than FAISS PQ</p></div>')
+        gr.HTML('<div class="metric"><h2>0</h2><p>Training needed</p></div>')
+
+    with gr.Tabs():
+
+        # ── SEARCH COMPARISON ──
+        with gr.TabItem("Search Comparison"):
+
+            gr.Markdown("### Side-by-Side Search: TurboQuant vs FAISS PQ")
+            gr.Markdown("*`+` = matches ground truth top-10. `-` = miss.*")
+
+            # Controls
+            with gr.Row():
+                ds_search = gr.Dropdown(
+                    [
+                        "synthetic",
+                        "wikipedia-384 (MiniLM)",
+                        "wikipedia-768 (BGE-base)",
+                        "wikipedia-1536 (OpenAI-dim)",
+                        "arxiv-384 (MiniLM)",
+                        "arxiv-1024 (BGE-large)",
+                    ],
+                    value="synthetic",
+                    label="Dataset (name-dim)",
+                    scale=2,
+                )
+                bits_slider = gr.Radio(["2", "3", "4"], value="3", label="TurboQuant bits")
+                reindex_btn = gr.Button("Re-index", variant="primary", scale=1)
+                search_btn = gr.Button("Random Search", variant="secondary", scale=1)
+
+            # Status
+            index_summary = gr.Markdown(value="*Loading...*")
+
+            # Stats chart
+            stats_chart = gr.Image(type="filepath", show_label=False, height=500)
+
+            # Search results
+            gr.Markdown("---")
+            query_info = gr.Markdown(value="")
+            with gr.Row():
+                tq_results = gr.Markdown(value="*Loading...*")
+                pq_results = gr.Markdown(value="")
+            with gr.Accordion("Ground Truth (exact)", open=False):
+                gt_results = gr.Markdown(value="")
+
+            # Wire up
+            reindex_btn.click(
+                fn=init_dashboard,
+                inputs=[ds_search, bits_slider],
+                outputs=[stats_chart, index_summary],
+            )
+            search_btn.click(
+                fn=random_search,
+                inputs=[bits_slider],
+                outputs=[tq_results, pq_results, gt_results, query_info],
+            )
+
+        # ── HOW IT WORKS ──
+        with gr.TabItem("How It Works"):
+            gr.Markdown("""## How It Works
 
 **Stage 1** — Multiply vector by random orthogonal matrix. Each coordinate becomes ~N(0, 1/d).
 Apply Lloyd-Max optimal quantizer (b bits per coord). Store index + norm.
@@ -355,97 +512,20 @@ PQ compresses more (24x vs 6-10x) but needs training on your data.
 
 [Paper](https://arxiv.org/abs/2504.19874) |
 [QJL](https://arxiv.org/abs/2406.03482) |
-[PolarQuant](https://arxiv.org/abs/2502.02617)"""
-
-_CSS = """
-.metric {
-    background: linear-gradient(135deg, #eff6ff, #f0f9ff);
-    border: 1px solid #bfdbfe; border-radius: 12px;
-    padding: 16px; text-align: center;
-}
-.metric h2 { margin: 0; font-size: 1.6rem; color: #1e40af; }
-.metric p { margin: 4px 0 0; font-size: 0.82rem; color: #475569; }
-"""
-
-with gr.Blocks(title="TurboQuant Search",
-               theme=gr.themes.Soft(primary_hue="blue", secondary_hue="cyan"),
-               css=_CSS) as demo:
-
-    gr.Markdown(_DESC)
-
-    # Key metrics
-    with gr.Row():
-        gr.HTML('<div class="metric"><h2>6-10x</h2><p>Compression</p></div>')
-        gr.HTML('<div class="metric"><h2>84-92%</h2><p>Recall@10 (4-bit)</p></div>')
-        gr.HTML('<div class="metric"><h2>~10x</h2><p>Faster than FAISS PQ</p></div>')
-        gr.HTML('<div class="metric"><h2>0</h2><p>Training needed</p></div>')
-
-    with gr.Tabs():
-
-        # ── BENCHMARK ──
-        with gr.TabItem("Benchmark"):
-
-            # 1. Controls — one compact row
-            with gr.Row():
-                ds = gr.Dropdown(list(DATASET_LABELS.keys()), value="synthetic",
-                                 label="Dataset", scale=3)
-                b4 = gr.Checkbox(label="4-bit", value=True)
-                b3 = gr.Checkbox(label="3-bit", value=True)
-                b2 = gr.Checkbox(label="2-bit", value=True)
-                btn = gr.Button("Run", variant="primary", scale=1)
-
-            # 2. Headline result
-            summary = gr.Markdown(value=_d_summary)
-
-            # 3. Chart — big
-            chart = gr.Image(type="filepath", value=_d_chart, show_label=False, height=600)
-
-            # 4. Table — visible, not hidden
-            tbl = gr.Dataframe(value=_d_rows, headers=_d_hdrs, interactive=False,
-                               label="Detailed Results")
-
-            btn.click(fn=benchmark_click, inputs=[ds, b2, b3, b4],
-                      outputs=[chart, tbl, summary])
-
-        # ── VISUALIZER ──
-        with gr.TabItem("Compression Visualizer"):
-
-            viz_img = gr.Image(type="filepath", value=_d_viz, show_label=False, height=480)
-            viz_txt = gr.Markdown(value=_d_viz_txt)
-
-            gr.Markdown("---")
-            with gr.Row():
-                v_dim = gr.Slider(16, 256, value=64, step=16, label="Dim")
-                v_bits = gr.Radio(["2","3","4"], value="3", label="Bits")
-                v_seed = gr.Slider(0, 999, value=42, step=1, label="Seed")
-                v_btn = gr.Button("Update", variant="primary")
-
-            v_btn.click(fn=_make_viz, inputs=[v_dim, v_bits, v_seed],
-                        outputs=[viz_img, viz_txt])
-
-        # ── CALCULATOR ──
-        with gr.TabItem("Memory Calculator"):
-
-            mem_img = gr.Image(type="filepath", value=_d_mem, show_label=False, height=260)
-            mem_txt = gr.Markdown(value=_d_mem_txt)
-
-            gr.Markdown("---")
-            with gr.Row():
-                c_n = gr.Slider(10_000, 100_000_000, value=1_000_000, step=10_000, label="Vectors")
-                c_dim = gr.Dropdown(["128","256","384","512","768","1024","1536"],
-                                    value="768", label="Dim")
-                c_prec = gr.Radio(["fp32","fp16"], value="fp32", label="Precision")
-                c_bits = gr.Radio(["2","3","4"], value="3", label="Bits")
-                c_btn = gr.Button("Update", variant="primary")
-
-            c_btn.click(fn=_make_mem, inputs=[c_n, c_dim, c_prec, c_bits],
-                        outputs=[mem_img, mem_txt])
-
-        # ── HOW IT WORKS ──
-        with gr.TabItem("How It Works"):
-            gr.Markdown(_HOW)
+[PolarQuant](https://arxiv.org/abs/2502.02617)""")
 
     gr.Markdown("---\n*Independent implementation inspired by the TurboQuant paper. Not affiliated with Google Research.*")
+
+    # Auto-initialize on page load
+    def _on_load():
+        chart, summary = init_dashboard("synthetic", "3")
+        tq, pq, gt, qi = random_search("3")
+        return chart, summary, tq, pq, gt, qi
+
+    demo.load(
+        fn=_on_load,
+        outputs=[stats_chart, index_summary, tq_results, pq_results, gt_results, query_info],
+    )
 
 demo.queue()
 if __name__ == "__main__":
