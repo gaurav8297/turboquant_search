@@ -369,6 +369,66 @@ class TestCompressWithDetails:
 
 
 # ─────────────────────────────────────────────────────────────
+# Rotated-space export helpers
+# ─────────────────────────────────────────────────────────────
+
+class TestRotatedSpaceExports:
+
+    def test_rotate_vectors_matches_internal_rotation(self):
+        dim = 16
+        tq = TurboQuantSearchIndex(dim=dim, bits=3, use_qjl=False, seed=42)
+        vectors = np.array(
+            [[1.0, np.nan] + [0.0] * (dim - 2), [0.5, np.inf] + [0.0] * (dim - 2)],
+            dtype=np.float32,
+        )
+
+        rotated = tq.rotate_vectors(vectors)
+        expected_input = np.nan_to_num(vectors, nan=0.0, posinf=0.0, neginf=0.0)
+        expected = tq._rotate(expected_input)
+
+        assert rotated.shape == (2, dim)
+        assert rotated.dtype == np.float32
+        assert np.allclose(rotated, expected)
+
+    @pytest.mark.parametrize(
+        "bits,use_residual_sign",
+        [
+            (1, False),
+            (2, False),
+            (3, False),
+            (4, False),
+            (8, False),
+            (2, True),
+        ],
+    )
+    def test_reconstruct_rotated_vectors_matches_internal_logic(self, bits, use_residual_sign):
+        dim = 16
+        rng = np.random.RandomState(42)
+        vectors = rng.randn(8, dim).astype(np.float32)
+
+        tq = TurboQuantSearchIndex(
+            dim=dim,
+            bits=bits,
+            use_qjl=use_residual_sign,
+            seed=42,
+        )
+
+        rotated = tq.rotate_vectors(vectors)
+        indices, reconstructed, norms = tq._quantize_coords(rotated)
+        expected = reconstructed
+        if use_residual_sign:
+            normalized = rotated / np.maximum(norms[:, np.newaxis], 1e-8)
+            sign_bits = tq._encode_sign_bits(normalized, indices)
+            expected = tq.sub_centroids[indices, sign_bits] * norms[:, np.newaxis]
+
+        actual = tq.reconstruct_rotated_vectors(vectors)
+
+        assert actual.shape == vectors.shape
+        assert actual.dtype == np.float32
+        assert np.allclose(actual, expected)
+
+
+# ─────────────────────────────────────────────────────────────
 # Flat and PQ baseline tests
 # ─────────────────────────────────────────────────────────────
 

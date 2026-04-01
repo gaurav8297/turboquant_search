@@ -246,6 +246,67 @@ class TurboQuantSearchIndex:
         residual = normalized - self.centroids[indices]
         return (residual >= 0).astype(np.uint8)
 
+    def rotate_vectors(self, vectors: np.ndarray) -> np.ndarray:
+        """
+        Rotate vectors into the orthogonal basis used by TurboQuant.
+
+        Parameters
+        ----------
+        vectors : np.ndarray of shape (n, dim)
+            Input vectors to rotate.
+
+        Returns
+        -------
+        np.ndarray of shape (n, dim)
+            Rotated vectors as float32.
+        """
+        vectors = np.asarray(vectors, dtype=np.float32)
+        if vectors.ndim != 2:
+            raise ValueError(f"Expected 2D array of shape (n, {self.dim}), got ndim={vectors.ndim}")
+        if vectors.shape[1] != self.dim:
+            raise ValueError(f"Expected dim={self.dim}, got {vectors.shape[1]}")
+        vectors = np.nan_to_num(vectors, nan=0.0, posinf=0.0, neginf=0.0)
+        return self._rotate(vectors)
+
+    def reconstruct_rotated_vectors(
+        self,
+        vectors: np.ndarray,
+        use_residual_sign: Optional[bool] = None,
+    ) -> np.ndarray:
+        """
+        Reconstruct vectors in rotated space using TurboQuant centroids.
+
+        This applies the same rotated-space reconstruction used internally
+        during search, without mutating the index or storing the vectors.
+
+        Parameters
+        ----------
+        vectors : np.ndarray of shape (n, dim)
+            Input vectors to rotate, quantize, and reconstruct.
+        use_residual_sign : bool, optional
+            Override whether sign-bit refinement is applied. Defaults to the
+            mode configured on this index instance.
+
+        Returns
+        -------
+        np.ndarray of shape (n, dim)
+            Reconstructed vectors in rotated space.
+        """
+        if use_residual_sign is None:
+            use_residual_sign = self.use_residual_sign
+
+        rotated = self.rotate_vectors(vectors)
+        indices, reconstructed, norms = self._quantize_coords(rotated)
+        if not use_residual_sign:
+            return reconstructed
+
+        normalized = rotated / np.maximum(norms[:, np.newaxis], 1e-8)
+        sign_bits = self._encode_sign_bits(normalized, indices)
+        sub_centroids = getattr(self, "sub_centroids", None)
+        if sub_centroids is None:
+            sub_centroids = _get_sub_centroids(self.bits, self.dim)
+        return sub_centroids[indices, sign_bits] * norms[:, np.newaxis]
+
     def add(self, vectors: np.ndarray):
         """
         Add vectors to the index.
